@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
-import { PenLine, BookOpen, Users, Globe, ArrowRight, Loader2 } from 'lucide-react'
+import { PenLine, BookOpen, Users, Globe, ArrowRight, Loader2, Download, FileText } from 'lucide-react'
 
 interface NovelData {
   id: string
@@ -41,6 +41,10 @@ export default function NovelDashboardPage() {
         <Loader2 className="size-6 animate-spin text-muted-foreground" />
       </div>
     )
+  }
+
+  const handleExport = (format: 'txt' | 'md') => {
+    window.open(`/api/novels/${id}/export?format=${format}`, '_blank')
   }
 
   if (!novel) return null
@@ -81,6 +85,32 @@ export default function NovelDashboardPage() {
             <span>角色管理</span>
           </Button>
         </Link>
+      </div>
+
+      {/* Export */}
+      <div className="mb-10">
+        <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
+          <Download className="size-5" />
+          导出
+        </h2>
+        <div className="flex gap-3">
+          <Button
+            variant="outline"
+            className="gap-2"
+            onClick={() => handleExport('txt')}
+          >
+            <FileText className="size-4" />
+            导出 TXT
+          </Button>
+          <Button
+            variant="outline"
+            className="gap-2"
+            onClick={() => handleExport('md')}
+          >
+            <FileText className="size-4" />
+            导出 Markdown
+          </Button>
+        </div>
       </div>
 
       {/* Volume List */}
