@@ -8,9 +8,9 @@ import Placeholder from '@tiptap/extension-placeholder'
 import { Button } from '@/components/ui/button'
 import {
   Plus, ChevronLeft, Loader2, Save, Check, Sparkles, Send,
-  PanelLeft, PanelRight, PenLine, Wand2, Expand,
+  PanelLeft, PanelRight, PenLine, Wand2, Expand, X,
   Bold, Italic, Underline, Heading1, Heading2, List, ListOrdered,
-  Undo, Redo, Quote,
+  Undo, Redo, Quote, FileText,
 } from 'lucide-react'
 
 interface Chapter {
@@ -35,9 +35,66 @@ function WritePageInner() {
   const [aiResponse, setAiResponse] = useState('')
   const [aiOperation, setAiOperation] = useState<'continue' | 'polish' | 'expand'>('continue')
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastSavedHash = useRef('')
+  const activeChapterRef = useRef<Chapter | null>(null) // Always in sync, avoids stale closure
   const [wordCount, setWordCount] = useState(0)
   // Selection toolbar position
   const [selToolbar, setSelToolbar] = useState<{ top: number; left: number } | null>(null)
+
+  // Scene outline floating panel
+  const [showScenePanel, setShowScenePanel] = useState(false)
+  const [sceneData, setSceneData] = useState<Array<{
+    id: string; title: string; setting: string; characters: string
+    conflict: string; outcome: string; emotionalBeat: string; notes: string
+  }>>([])
+  const [sceneLoading, setSceneLoading] = useState(false)
+
+  const loadScenes = useCallback(async (chapterId: string) => {
+    setSceneLoading(true)
+    try {
+      const res = await fetch(`/api/novels/${novelId}/chapters/${chapterId}/scenes`)
+      if (res.ok) {
+        const data = await res.json()
+        if (Array.isArray(data)) {
+          setSceneData(data.map((s: Record<string, unknown>) => ({
+            id: s.id as string,
+            title: (s.title as string) || '',
+            setting: (s.setting as string) || '',
+            characters: typeof s.characters === 'string' ? s.characters as string : '',
+            conflict: (s.conflict as string) || '',
+            outcome: (s.outcome as string) || '',
+            emotionalBeat: (s.emotionalBeat as string) || '',
+            notes: (s.notes as string) || '',
+          })))
+        }
+      }
+    } catch { setSceneData([]) }
+    finally { setSceneLoading(false) }
+  }, [novelId])
+
+  useEffect(() => {
+    if (showScenePanel && activeChapter) loadScenes(activeChapter.id)
+  }, [showScenePanel, activeChapter, loadScenes])
+
+  const updateScene = (idx: number, field: string, value: string) => {
+    setSceneData(prev => {
+      const next = [...prev]
+      next[idx] = { ...next[idx], [field]: value }
+      return next
+    })
+  }
+
+  const saveSceneItem = async (sceneId: string, idx: number) => {
+    const s = sceneData[idx]
+    if (!s) return
+    try {
+      await fetch(`/api/novels/${novelId}/chapters/${activeChapter?.id}/scenes`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sceneId, ...s }),
+      })
+    } catch (err) { console.error('Save scene failed:', err) }
+  }
 
   const editor = useEditor({
     extensions: [
@@ -88,6 +145,22 @@ function WritePageInner() {
       if (list.length > 0 && !activeChapter) {
         const target = targetChapterId ? list.find((c: Chapter) => c.id === targetChapterId) : null
         setPendingSelect(target ?? list[0])
+      } else if (activeChapterRef.current) {
+        // Refresh current chapter content from DB
+        const currentId = activeChapterRef.current.id
+        const updated = list.find((c: Chapter) => c.id === currentId)
+        if (updated && updated.content !== activeChapterRef.current?.content) {
+          // Content changed externally (e.g. expand in outline page), reload
+          if (editor) {
+            let content = updated.content || ''
+            if (content && !/<[hp]/.test(content)) {
+              content = content.split(/\n{2,}/).filter(Boolean).map((p: string) => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('')
+            }
+            editor.commands.setContent(content)
+            setWordCount(updated.wordCount || 0)
+          }
+          setActiveChapter(updated)
+        }
       }
     })
   }, [fetchChapters, targetChapterId])
@@ -96,20 +169,53 @@ function WritePageInner() {
     if (editor && pendingSelect) {
       editor.commands.setContent(pendingSelect.content || '')
       setActiveChapter(pendingSelect)
+      activeChapterRef.current = pendingSelect  // Sync ref
       setWordCount((pendingSelect.content || '').replace(/\s/g, '').length)
       setSaved(true); setPendingSelect(null)
     }
   }, [editor, pendingSelect])
 
-  const selectChapter = useCallback((ch: Chapter) => {
-    // Save current chapter before switching
-    if (editor && activeChapter && !saved) {
-      saveContent(editor.getHTML())
+  const [switchingChapter, setSwitchingChapter] = useState(false)
+
+  const selectChapter = useCallback(async (ch: Chapter) => {
+    if (ch.id === activeChapter?.id) return
+    setSwitchingChapter(true)
+    // Clear pending auto-save timer (prevents saving to wrong chapter)
+    if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null }
+    // Save current chapter before switching — await it
+    if (editor && activeChapter) {
+      const html = editor.getHTML()
+      const text = editor.getText().replace(/\s/g, '')
+      if (text.length > 0) {
+        const hash = html.length.toString() + html.slice(0, 100)
+        if (hash !== lastSavedHash.current || activeChapter.id !== lastSavedChapter.current) {
+          await fetch(`/api/novels/${novelId}/chapters/${activeChapter.id}`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: html }),
+          }).catch(() => {})
+          lastSavedHash.current = hash
+          lastSavedChapter.current = activeChapter.id
+        }
+      }
     }
     setActiveChapter(ch)
-    if (editor) { editor.commands.setContent(ch.content || ''); setWordCount((ch.content || '').replace(/\s/g, '').length); setSaved(true) }
-    else setPendingSelect(ch)
-  }, [editor, activeChapter, saved])
+    activeChapterRef.current = ch  // Sync ref immediately
+    // Reset hash tracker for new chapter
+    lastSavedHash.current = ''
+    lastSavedChapter.current = ch.id
+    if (editor) {
+      // Load content: if stored as plain text (no HTML tags), wrap in <p>
+      let content = ch.content || ''
+      if (content && !/<[hp]/.test(content)) {
+        content = content.split(/\n{2,}/).filter(Boolean).map((p: string) => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('')
+      }
+      editor.commands.setContent(content)
+      setWordCount(ch.wordCount || 0)
+      setSaved(true)
+      setAiResponse('')
+    } else setPendingSelect(ch)
+    setSwitchingChapter(false)
+  }, [editor, activeChapter, novelId])
 
   const createChapter = async () => {
     try {
@@ -118,12 +224,26 @@ function WritePageInner() {
     } catch (err) { console.error(err) }
   }
 
-  const saveContent = async (content: string) => {
-    if (!activeChapter) return; setSaving(true)
-    try { await fetch(`/api/novels/${novelId}/chapters/${activeChapter.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }) }); setSaved(true) }
-    catch (err) { console.error(err) }
+  const saveContent = async (content: string, force = false) => {
+    const ch = activeChapterRef.current  // Use ref to avoid stale React state
+    if (!ch) return
+    const hash = content.length.toString() + content.slice(0, 100)
+    if (!force && hash === lastSavedHash.current && ch.id === lastSavedChapter.current) return
+    setSaving(true)
+    try {
+      await fetch(`/api/novels/${novelId}/chapters/${ch.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }) })
+      lastSavedHash.current = hash
+      lastSavedChapter.current = ch.id
+      setSaved(true)
+    } catch (err) { console.error(err) }
     finally { setSaving(false) }
   }
+  const lastSavedChapter = useRef('')
+
+  // Keep ref in sync with state, no matter how activeChapter changes
+  useEffect(() => {
+    activeChapterRef.current = activeChapter
+  }, [activeChapter])
   const manualSave = () => { if (editor) saveContent(editor.getHTML()) }
 
   // ─── AI Operations ─────────────────────────────
@@ -200,7 +320,14 @@ function WritePageInner() {
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); manualSave() } }
-    window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h)
+    window.addEventListener('keydown', h)
+    // Re-fetch chapters when tab becomes visible (content may have changed in outline page)
+    const onVisible = () => { if (document.visibilityState === 'visible') fetchChapters() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.removeEventListener('keydown', h)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
   }, [])
 
   const targetWords = activeChapter?.targetWords ?? 3000
@@ -281,6 +408,7 @@ function WritePageInner() {
           </Button>
 
           <Button variant="ghost" size="icon" className="size-8" onClick={() => setShowAiPanel(!showAiPanel)}><PanelRight className="size-4" /></Button>
+          <Button variant="ghost" size="icon" className="size-8" onClick={() => setShowScenePanel(!showScenePanel)} title="场景细纲"><FileText className="size-4" /></Button>
         </div>
 
         {/* Floating Selection Toolbar */}
@@ -321,6 +449,49 @@ function WritePageInner() {
         </div>
       </div>
 
+      {/* Scene Outline Panel — editable, syncs to DB */}
+      {showScenePanel && (
+        <aside className="w-72 border-l bg-sidebar shrink-0 flex flex-col">
+          <div className="p-3 border-b flex items-center justify-between">
+            <h3 className="text-sm font-semibold flex items-center gap-1.5"><FileText className="size-3.5" /> 场景细纲</h3>
+            <button onClick={() => setShowScenePanel(false)} className="p-0.5 hover:bg-accent rounded"><X className="size-3.5" /></button>
+          </div>
+          <div className="flex-1 overflow-auto p-3">
+            {sceneLoading ? (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground py-4"><Loader2 className="size-3.5 animate-spin" />加载中...</div>
+            ) : sceneData.length > 0 ? (
+              <div className="space-y-3">
+                {sceneData.map((s, i) => (
+                  <div key={s.id || i} className="rounded-lg border bg-card/50 p-3 text-xs">
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <span className="font-mono text-[10px] text-muted-foreground bg-muted px-1 py-0.5 rounded">S{i + 1}</span>
+                      <input className="font-medium flex-1 bg-transparent border-b border-transparent hover:border-muted-foreground/30 focus:border-primary focus:outline-none px-1"
+                        value={s.title} onChange={e => updateScene(i, 'title', e.target.value)} />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Field label="📍 地点" value={s.setting} onChange={v => updateScene(i, 'setting', v)} />
+                      <Field label="👤 角色" value={s.characters} onChange={v => updateScene(i, 'characters', v)} />
+                      <Field label="⚔️ 冲突" value={s.conflict} onChange={v => updateScene(i, 'conflict', v)} />
+                      <Field label="🎯 结果" value={s.outcome} onChange={v => updateScene(i, 'outcome', v)} />
+                      <Field label="💭 情感" value={s.emotionalBeat} onChange={v => updateScene(i, 'emotionalBeat', v)} />
+                    </div>
+                    <button
+                      className="mt-2 text-[10px] text-primary hover:underline"
+                      onClick={() => saveSceneItem(s.id, i)}>
+                      保存此场景
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground py-4 text-center">
+                暂无场景细纲。<br />请先在大纲页面生成。
+              </p>
+            )}
+          </div>
+        </aside>
+      )}
+
       {/* AI Panel */}
       {showAiPanel && (
         <aside className="w-72 border-l bg-sidebar shrink-0 flex flex-col">
@@ -346,6 +517,18 @@ function WritePageInner() {
           </div>
         </aside>
       )}
+    </div>
+  )
+}
+
+// ─── Inline field component for scene edit ────────
+
+function Field({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <div className="flex items-center gap-1">
+      <span className="text-muted-foreground shrink-0">{label}</span>
+      <input className="flex-1 bg-transparent border-b border-transparent hover:border-muted-foreground/30 focus:border-primary focus:outline-none px-1"
+        value={value || ''} onChange={e => onChange(e.target.value)} />
     </div>
   )
 }

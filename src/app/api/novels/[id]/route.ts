@@ -60,6 +60,16 @@ export async function PATCH(
     },
   })
 
+  // Update NovelSettings if provided
+  if (body.settings) {
+    const s = body.settings
+    await prisma.novelSettings.upsert({
+      where: { novelId: id },
+      create: { novelId: id, ...s },
+      update: s,
+    })
+  }
+
   return NextResponse.json(novel)
 }
 
@@ -68,10 +78,7 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
-  // 软删除
-  await prisma.novel.update({
-    where: { id },
-    data: { deletedAt: new Date() },
-  })
+  // 硬删除（级联删除子表）
+  await prisma.novel.delete({ where: { id } })
   return NextResponse.json({ ok: true })
 }

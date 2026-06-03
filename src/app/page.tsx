@@ -197,10 +197,12 @@ export default function HomePage() {
             {novels.length > 0 ? `共 ${novels.length} 部作品` : '开始你的第一部作品'}
           </p>
         </div>
-        <Button onClick={() => setShowCreate(true)}>
-          <Plus className="size-4" />
-          新建小说
-        </Button>
+        <Link href="/novel/new">
+          <Button>
+            <Plus className="size-4" />
+            新建小说
+          </Button>
+        </Link>
       </div>
 
       {/* Novel Cards */}

@@ -94,18 +94,26 @@ export class HybridSearch {
       },
     }) as ChunkWithChapter[]
 
-    // 构建 ID → Chunk 映射
-    const chunkMap = new Map(chunks.map((c) => [c.id, c]))
+    // 按 retrievalScope 过滤
+    const filteredChunks = this.filterByScope(chunks, options)
+
+    // 构建 ID → Chunk 映射（兼容子块 ID: chunkId_0 → chunkId）
+    const chunkMap = new Map(filteredChunks.map((c) => [c.id, c]))
     // 构建 ID → distance 映射
     const distanceMap = new Map(rawResults.map((r: VecSearchResult) => [r.id, r.distance]))
 
     return chunkIds
-      .filter((id) => chunkMap.has(id))
       .map((id) => {
-        const chunk = chunkMap.get(id)!
+        // 子块 ID 映射回父块: "abc_0" → "abc"
+        const parentId = id.includes('_') ? id.split('_')[0] : id
+        return { id, parentId }
+      })
+      .filter(({ parentId }) => chunkMap.has(parentId))
+      .map(({ id, parentId }) => {
+        const chunk = chunkMap.get(parentId)!
         const distance = distanceMap.get(id) ?? 1
         return {
-          chunkId: id,
+          chunkId: parentId,
           chapterId: chunk.chapterId,
           chapterTitle: chunk.chapter.title,
           chapterNumber: chunk.chapter.sortOrder,
@@ -127,7 +135,7 @@ export class HybridSearch {
     if (keywords.length === 0) return []
 
     // 构建 LIKE 查询
-    const conditions = keywords.map(() => `content LIKE ?`).join(' OR ')
+    const conditions = keywords.map(() => `cc.content LIKE ?`).join(' OR ')
     const params = keywords.map((kw) => `%${kw}%`)
 
     const chunks = await prisma.$queryRawUnsafe(
@@ -217,6 +225,55 @@ export class HybridSearch {
   }
 
   // ─── 工具 ──────────────────────────────────────
+
+  // ─── 作用域过滤 ──────────────────────────────
+
+  private filterByScope(
+    chunks: ChunkWithChapter[],
+    options: HybridSearchOptions,
+  ): ChunkWithChapter[] {
+    const { retrievalScope, chapterId, volumeId } = options
+
+    switch (retrievalScope) {
+      case 'chapter':
+        // 只返回当前章节的切片
+        if (!chapterId) return chunks
+        return chunks.filter((c) => c.chapterId === chapterId)
+
+      case 'volume': {
+        // 只返回同卷的切片
+        if (!volumeId) {
+          // 如果能从 chapterId 推 volumeId
+          const targetChapter = chapterId
+            ? chunks.find((c) => c.chapterId === chapterId)
+            : null
+          if (targetChapter?.chapter?.volumeId) {
+            const vid = targetChapter.chapter.volumeId
+            return chunks.filter((c) => c.chapter?.volumeId === vid)
+          }
+          return chunks
+        }
+        return chunks.filter((c) => c.chapter?.volumeId === volumeId)
+      }
+
+      case 'novel':
+        // 全书范围（默认）
+        return chunks
+
+      case 'smart':
+        // 智能：优先同卷，扩展到全书
+        if (!chapterId) return chunks
+        const chapterVol = chunks.find((c) => c.chapterId === chapterId)?.chapter?.volumeId
+        if (!chapterVol) return chunks
+        const sameVol = chunks.filter((c) => c.chapter?.volumeId === chapterVol)
+        // 同卷结果 ≥ topK 时只用同卷
+        if (sameVol.length >= 3) return sameVol
+        return chunks
+
+      default:
+        return chunks
+    }
+  }
 
   private truncateContent(content: string, maxChars: number): string {
     if (content.length <= maxChars) return content

@@ -191,6 +191,7 @@ export interface EmbeddingConfig {
   model: string                    // 本地: 'bge-small-zh-v1.5', OpenAI: 'text-embedding-3-small'
   dimensions: number
   apiKey?: string
+  baseUrl?: string                 // OpenAI 兼容 API 的 base URL
 }
 
 export interface VectorSearchResult {

@@ -9,6 +9,7 @@
  */
 
 import type { EmbeddingConfig } from '../types'
+import { recordAICall } from '../../ai/stats'
 
 export interface EmbeddingResult {
   embeddings: number[][]
@@ -34,6 +35,7 @@ export class EmbeddingService {
       model: config?.model ?? DEFAULT_LOCAL_MODEL,
       dimensions: config?.dimensions ?? DEFAULT_LOCAL_DIMS,
       apiKey: config?.apiKey,
+      baseUrl: config?.baseUrl,
     }
   }
 
@@ -118,8 +120,12 @@ export class EmbeddingService {
       throw new Error('OpenAI API key is required for cloud embeddings')
     }
 
-    const baseUrl = process.env['OPENAI_BASE_URL'] ?? 'https://api.openai.com/v1'
-    const response = await fetch(`${baseUrl}/embeddings`, {
+    const baseUrl = this.config.baseUrl || process.env['OPENAI_BASE_URL'] || 'https://api.openai.com/v1'
+    const url = `${baseUrl}/embeddings`
+    console.log('[Embedding] Calling:', url)
+    console.log('[Embedding] Model:', this.config.model)
+    console.log('[Embedding] Key prefix:', apiKey.slice(0, 8) + '...')
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -128,18 +134,22 @@ export class EmbeddingService {
       body: JSON.stringify({
         model: this.config.model,
         input: texts,
-        dimensions: this.config.dimensions,
       }),
     })
 
+    const latMs = Date.now()
     if (!response.ok) {
       const err = await response.text()
+      recordAICall({ operation: 'embedding', model: this.config.model, promptTokens: 0, completionTokens: 0, latencyMs: latMs, success: false })
       throw new Error(`OpenAI Embeddings API error: ${response.status} ${err}`)
     }
 
     const data = await response.json() as {
       data: { embedding: number[]; index: number }[]
+      usage?: { prompt_tokens: number; total_tokens: number }
     }
+    const tokens = data.usage?.total_tokens ?? texts.length * 100
+    recordAICall({ operation: 'embedding', model: this.config.model, promptTokens: tokens, completionTokens: 0, latencyMs: Date.now() - latMs + latMs, success: true })
 
     // 按 index 排序
     return data.data
@@ -174,6 +184,8 @@ let embeddingServiceInstance: EmbeddingService | null = null
 export function getEmbeddingService(config?: Partial<EmbeddingConfig>): EmbeddingService {
   if (!embeddingServiceInstance) {
     embeddingServiceInstance = new EmbeddingService(config)
+  } else if (config) {
+    embeddingServiceInstance.updateConfig(config)
   }
   return embeddingServiceInstance
 }

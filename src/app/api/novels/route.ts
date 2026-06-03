@@ -48,12 +48,25 @@ export async function POST(req: Request) {
       targetWords: body.targetWords || 0,
       perspective: body.perspective || 'third',
       tense: body.tense || 'past',
+      styleProfile: body.styleProfile || null,
     },
   })
 
-  // 自动创建小说设置
+  // 继承已有的嵌入配置（从任意一本已有小说的设置中复制）
+  const existingSettings = await prisma.novelSettings.findFirst({
+    where: { embeddingProviderId: { not: null } },
+    select: { embeddingProviderId: true, embeddingModel: true },
+  })
+
+  // 自动创建小说设置（含默认 provider/model + 嵌入配置）
   await prisma.novelSettings.create({
-    data: { novelId: novel.id },
+    data: {
+      novelId: novel.id,
+      ...(body.defaultProviderId && { defaultProviderId: body.defaultProviderId }),
+      ...(body.defaultModel && { defaultModel: body.defaultModel }),
+      ...(existingSettings?.embeddingProviderId && { embeddingProviderId: existingSettings.embeddingProviderId }),
+      ...(existingSettings?.embeddingModel && { embeddingModel: existingSettings.embeddingModel }),
+    },
   })
 
   return NextResponse.json(novel, { status: 201 })

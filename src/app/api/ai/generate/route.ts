@@ -9,17 +9,17 @@
 
 import { NextResponse } from 'next/server'
 import { getContextPipeline } from '@/lib/context/pipeline'
+import { selectModel, callAIChat, estimateTokens } from '@/lib/ai/call'
 
 export const dynamic = 'force-dynamic'
 import { aiLogger } from '@/lib/context/ai-logger'
-import { prisma } from '@/lib/db/prisma'
 import type { ContextRequest } from '@/lib/context/types'
 
 export async function POST(req: Request) {
   const startTime = Date.now()
   
   try {
-    const body = await req.json() as ContextRequest & { modelId?: string }
+    const body = await req.json() as ContextRequest & { modelId?: string; stream?: boolean }
 
     if (!body.novelId || !body.operation) {
       return NextResponse.json(
@@ -42,11 +42,37 @@ export async function POST(req: Request) {
       userInstruction: body.userInstruction,
     })
 
-    // Step 2: 选择模型 & 调用 AI
+    // Step 2: 选择模型
     const { modelId, provider } = await selectModel(body.modelId)
-    const aiResponse = await callAI(context.systemPrompt, context.messages, modelId, provider)
 
-    // Step 3: 记录日志
+    // ─── 流式输出 (SSE) ─────────────────────────
+
+    if (body.stream && provider) {
+      const stream = await streamAIResponse(
+        provider.baseUrl,
+        provider.apiKey,
+        modelId,
+        context.systemPrompt,
+        context.messages.map(m => ({ role: m.role, content: m.content })),
+      )
+
+      return new NextResponse(stream, {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        },
+      })
+    }
+
+    // Step 3: 非流式 — 调用 AI
+    const aiResponse = await callAIChat(
+      context.systemPrompt,
+      context.messages.map(m => ({ role: m.role, content: m.content })),
+      { modelId, temperature: 0.8, maxTokens: 4000 },
+    )
+
+    // Step 4: 记录日志
     await aiLogger.log({
       novelId: body.novelId,
       chapterId: body.chapterId,
@@ -76,6 +102,78 @@ export async function POST(req: Request) {
       { status: 500 },
     )
   }
+}
+
+// ─── 流式 AI 调用 ────────────────────────────────
+
+async function streamAIResponse(
+  baseUrl: string,
+  apiKey: string,
+  modelId: string,
+  systemPrompt: string,
+  messages: { role: string; content: string }[],
+): Promise<ReadableStream> {
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: modelId,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...messages,
+      ],
+      temperature: 0.8,
+      max_tokens: 4000,
+      stream: true,
+    }),
+  })
+
+  if (!response.ok) {
+    const err = await response.text()
+    throw new Error(`AI API stream error: ${response.status} ${err}`)
+  }
+
+  // 将 OpenAI SSE 流转换为我们的 SSE 格式
+  const reader = response.body!.getReader()
+  const decoder = new TextDecoder()
+  const encoder = new TextEncoder()
+
+  return new ReadableStream({
+    async pull(controller) {
+      const { done, value } = await reader.read()
+      if (done) {
+        controller.enqueue(encoder.encode('data: {"type":"done"}\n\n'))
+        controller.close()
+        return
+      }
+
+      const chunk = decoder.decode(value, { stream: true })
+      // OpenAI SSE lines: "data: {...}\n\n"
+      const lines = chunk.split('\n')
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6)
+          if (data === '[DONE]') {
+            controller.enqueue(encoder.encode('data: {"type":"done"}\n\n'))
+            controller.close()
+            return
+          }
+          try {
+            const parsed = JSON.parse(data)
+            const content = parsed.choices?.[0]?.delta?.content
+            if (content) {
+              controller.enqueue(encoder.encode(`data: {"type":"token","content":${JSON.stringify(content)}}\n\n`))
+            }
+          } catch {
+            // Skip non-JSON lines
+          }
+        }
+      }
+    },
+  })
 }
 
 /**
@@ -112,80 +210,4 @@ export async function GET(req: Request) {
   })
 }
 
-// ─── 模型选择 ───────────────────────────────────
 
-async function selectModel(requestedModel?: string): Promise<{
-  modelId: string
-  provider: { baseUrl: string; apiKey: string } | null
-}> {
-  const provider = await prisma.aIProvider.findFirst({
-    where: { isActive: true },
-  }) as { baseUrl: string; apiKey: string; models: string } | null
-
-  if (!provider) {
-    return { modelId: requestedModel ?? 'deepseek-v4-flash', provider: null }
-  }
-
-  // 解析模型列表
-  let models: string[] = []
-  try { models = JSON.parse(provider.models) } catch { models = provider.models.split(',').map(s => s.trim()) }
-
-  // 使用请求的模型，或默认第一个
-  const modelId = requestedModel && models.includes(requestedModel)
-    ? requestedModel
-    : models[0] ?? 'deepseek-v4-flash'
-
-  return { modelId, provider: { baseUrl: provider.baseUrl, apiKey: provider.apiKey } }
-}
-
-// ─── AI 调用 ─────────────────────────────────────
-
-async function callAI(
-  systemPrompt: string,
-  messages: { role: string; content: string }[],
-  modelId: string,
-  provider: { baseUrl: string; apiKey: string } | null,
-): Promise<string> {
-  if (!provider) {
-    return `[未配置 AI 提供商] 请在设置页面配置 API Key。
-
-模型: ${modelId}
-系统提示词长度: ${systemPrompt.length} 字符`
-  }
-
-  // 实际 AI 调用
-  const response = await fetch(`${provider.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${provider.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: modelId,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        ...messages.map((m) => ({ role: m.role, content: m.content })),
-      ],
-      temperature: 0.8,
-      max_tokens: 4000,
-    }),
-  })
-
-  if (!response.ok) {
-    const err = await response.text()
-    throw new Error(`AI API error: ${response.status} ${err}`)
-  }
-
-  const data = await response.json()
-  return data.choices?.[0]?.message?.content ?? ''
-}
-
-function estimateTokens(text: string): number {
-  let tokens = 0
-  for (const char of text) {
-    if (/[\u4e00-\u9fff]/.test(char)) tokens += 1.5
-    else if (/[a-zA-Z]/.test(char)) tokens += 0.25
-    else tokens += 0.5
-  }
-  return Math.ceil(tokens)
-}

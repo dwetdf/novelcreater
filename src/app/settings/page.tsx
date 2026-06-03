@@ -13,12 +13,19 @@ interface AIProvider {
   isActive: boolean
 }
 
-// ─── DeepSeek 默认配置 ────────────────────────────
+// ─── 预设配置 ────────────────────────────────────
 
 const DEEPSEEK_DEFAULTS = {
   name: 'DeepSeek',
   baseUrl: 'https://api.deepseek.com/v1',
   models: 'deepseek-v4-flash, deepseek-v4-pro',
+}
+
+const SILICONFLOW_DEFAULTS = {
+  name: '硅基流动',
+  baseUrl: 'https://api.siliconflow.cn/v1',
+  models: 'Qwen/Qwen3-8B, Qwen/Qwen2.5-7B-Instruct',
+  embeddingModel: 'BAAI/bge-large-zh-v1.5',
 }
 
 export default function SettingsPage() {
@@ -32,6 +39,11 @@ export default function SettingsPage() {
   })
   const [saving, setSaving] = useState(false)
   const [setupLoading, setSetupLoading] = useState(false)
+  const [sfSetupLoading, setSfSetupLoading] = useState(false)
+
+  // Embedding config state
+  const [embeddingProviderId, setEmbeddingProviderId] = useState('')
+  const [embeddingModel, setEmbeddingModel] = useState('')
 
   const fetchProviders = useCallback(async () => {
     try {
@@ -46,6 +58,73 @@ export default function SettingsPage() {
   }, [])
 
   useEffect(() => { fetchProviders() }, [fetchProviders])
+
+  // ─── 一键配置硅基流动 ──────────────────────────
+
+  const handleSetupSiliconFlow = async () => {
+    setSfSetupLoading(true)
+    try {
+      const res = await fetch('/api/settings/providers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: SILICONFLOW_DEFAULTS.name,
+          apiKey: '',
+          baseUrl: SILICONFLOW_DEFAULTS.baseUrl,
+          models: SILICONFLOW_DEFAULTS.models.split(',').map((s) => s.trim()),
+        }),
+      })
+      if (res.ok) {
+        const created = await res.json()
+        // Auto-save as embedding provider
+        setEmbeddingProviderId(created.id)
+        setEmbeddingModel(SILICONFLOW_DEFAULTS.embeddingModel)
+        await fetchProviders()
+        // Save to NovelSettings
+        await handleSaveEmbeddingConfigDirect(created.id, SILICONFLOW_DEFAULTS.embeddingModel)
+      }
+    } catch (err) { console.error('Setup SiliconFlow failed:', err) }
+    finally { setSfSetupLoading(false) }
+  }
+
+  // ─── 保存嵌入配置（直接参数版）──────────────────
+
+  const handleSaveEmbeddingConfigDirect = async (providerId: string, model: string) => {
+    try {
+      const novelsRes = await fetch('/api/novels')
+      const novels = await novelsRes.json()
+      if (Array.isArray(novels)) {
+        for (const n of novels) {
+          await fetch(`/api/novels/${n.id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ settings: { embeddingProviderId: providerId, embeddingModel: model } }),
+          })
+        }
+      }
+    } catch (err) { console.error('Save embedding config failed:', err) }
+  }
+
+  // ─── 保存嵌入配置 ───────────────────────────────
+
+  const handleSaveEmbeddingConfig = async () => {
+    try {
+      // Save to the first novel's settings (global embedding config)
+      const novelsRes = await fetch('/api/novels')
+      const novels = await novelsRes.json()
+      if (Array.isArray(novels) && novels.length > 0) {
+        for (const n of novels) {
+          await fetch(`/api/novels/${n.id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              settings: { embeddingProviderId: embeddingProviderId || null, embeddingModel: embeddingModel || null },
+            }),
+          })
+        }
+      }
+    } catch (err) { console.error('Save embedding config failed:', err) }
+  }
 
   // ─── 一键配置 DeepSeek ──────────────────────────
 
@@ -213,7 +292,7 @@ export default function SettingsPage() {
             {/* API Key */}
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">
-                API Key {deepseekProvider.apiKey ? '✅ 已配置' : '⚠️ 未配置'}
+                API Key {deepseekProvider.apiKey && deepseekProvider.apiKey !== '****' ? '✅ 已配置' : '⚠️ 未配置'}
               </label>
               <div className="flex gap-2">
                 <input
@@ -246,6 +325,80 @@ export default function SettingsPage() {
           </div>
         )}
       </section>
+
+      {/* ─── 硅基流动 专区 ───────────────────────── */}
+      {(() => {
+        const sfProvider = providers.find((p) => p.name === '硅基流动')
+        return (
+          <section className="mb-10">
+            <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+              <Zap className="size-5 text-purple-500" />
+              向量嵌入：硅基流动
+            </h2>
+            {!sfProvider ? (
+              <div className="rounded-lg border-2 border-purple-200 dark:border-purple-800 bg-purple-50/50 dark:bg-purple-950/20 p-5">
+                <p className="text-sm mb-3">硅基流动提供免费额度的中文嵌入 API，适合 RAG 向量检索。</p>
+                <div className="flex items-center gap-3 text-xs text-muted-foreground mb-4">
+                  <code className="bg-muted px-2 py-0.5 rounded">{SILICONFLOW_DEFAULTS.baseUrl}</code>
+                  <code className="bg-muted px-2 py-0.5 rounded">嵌入: {SILICONFLOW_DEFAULTS.embeddingModel}</code>
+                </div>
+                <Button onClick={handleSetupSiliconFlow} disabled={sfSetupLoading} size="sm" variant="outline" className="gap-1.5">
+                  {sfSetupLoading ? <Loader2 className="size-3.5 animate-spin" /> : <Zap className="size-3.5" />}
+                  一键配置硅基流动
+                </Button>
+              </div>
+            ) : (
+              <div className="rounded-lg border bg-card p-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <span className="font-semibold">{sfProvider.name}</span>
+                    <button onClick={() => handleToggleActive(sfProvider.id, sfProvider.isActive)}
+                      className={`text-xs px-2 py-0.5 rounded-full ${sfProvider.isActive ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : 'bg-muted text-muted-foreground'}`}>
+                      {sfProvider.isActive ? '已启用' : '已停用'}
+                    </button>
+                  </div>
+                  <Button variant="ghost" size="icon" onClick={() => handleDelete(sfProvider.id)}>
+                    <Trash2 className="size-4 text-muted-foreground" />
+                  </Button>
+                </div>
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div><label className="text-xs text-muted-foreground">Base URL</label><p className="font-mono text-xs mt-0.5">{sfProvider.baseUrl}</p></div>
+                  <div><label className="text-xs text-muted-foreground">模型</label><p className="text-xs mt-0.5">{safeParseModels(sfProvider.models).join(', ')}</p></div>
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">
+                    API Key {sfProvider.apiKey && sfProvider.apiKey !== '****' ? '✅ 已配置' : '⚠️ 未配置'}
+                  </label>
+                  <div className="flex gap-2">
+                    <input type="password"
+                      className="flex-1 rounded-md border bg-background px-2.5 py-1.5 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+                      placeholder={sfProvider.apiKey ? '••••••••' : '输入硅基流动 API Key'}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { handleUpdateKey(sfProvider.id, (e.target as HTMLInputElement).value); (e.target as HTMLInputElement).value = '' } }} />
+                    <Button size="sm" variant="outline" onClick={(e) => {
+                      const input = (e.currentTarget as HTMLElement).previousElementSibling as HTMLInputElement
+                      handleUpdateKey(sfProvider.id, input.value); input.value = ''
+                    }}>保存</Button>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground mt-1">获取 Key: https://siliconflow.cn → API Keys</p>
+                </div>
+                {/* Embedding model config */}
+                <div className="pt-3 border-t">
+                  <label className="text-xs text-muted-foreground mb-1 block">嵌入模型名（用于 RAG 向量检索）</label>
+                  <div className="flex gap-2">
+                    <input className="flex-1 rounded-md border bg-background px-2.5 py-1.5 text-sm"
+                      value={embeddingModel || SILICONFLOW_DEFAULTS.embeddingModel}
+                      onChange={e => setEmbeddingModel(e.target.value)}
+                      placeholder={SILICONFLOW_DEFAULTS.embeddingModel} />
+                    <Button size="sm" onClick={handleSaveEmbeddingConfig} className="gap-1.5">保存</Button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </section>
+        )
+      })()}
+
+
 
       {/* ─── 其他提供商 ───────────────────────────── */}
       <section className="mb-10">

@@ -4,10 +4,26 @@ import { NextResponse } from 'next/server'
 export const dynamic = 'force-dynamic'
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
+  const url = new URL(req.url)
+  const historyCharId = url.searchParams.get('history')
+
+  // 状态历史查询（针对单个角色）
+  if (historyCharId) {
+    const states = await prisma.characterStateSnapshot.findMany({
+      where: { characterId: historyCharId },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+      include: {
+        chapter: { select: { title: true, sortOrder: true } },
+      },
+    })
+    return NextResponse.json(states)
+  }
+
   const characters = await prisma.character.findMany({
     where: { novelId: id },
     orderBy: { createdAt: 'desc' },

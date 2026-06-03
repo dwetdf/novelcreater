@@ -22,7 +22,8 @@ model AIProvider {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  novelSettings NovelSettings[]
+  novelSettings    NovelSettings[]       @relation("DefaultProvider")
+  embeddingSettings NovelSettings[]      @relation("EmbeddingProvider")
 }
 
 // ─── 小说 ─────────────────────────────────────────
@@ -56,6 +57,7 @@ model Novel {
   memoryItems    MemoryItem[]
   settings       NovelSettings?
   chapterChunks  ChapterChunk[]
+  chapterScenes  ChapterScene[]
 }
 
 // ─── 卷 ───────────────────────────────────────────
@@ -103,6 +105,7 @@ model Chapter {
   updatedAt    DateTime @updatedAt
 
   chapterSummary      ChapterSummary?
+  scenes              ChapterScene[]
   chunks              ChapterChunk[]
   stateSnapshots      CharacterStateSnapshot[]
   memoryItems         MemoryItem[]       @relation("SourceChapter")
@@ -295,6 +298,31 @@ model Foreshadowing {
   @@index([plantChapterId])
 }
 
+// ─── 章节场景（细纲）───────────────────────────────
+
+model ChapterScene {
+  id            String   @id @default(cuid())
+  chapterId     String
+  chapter       Chapter  @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  novelId       String
+  novel         Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  seq           Int      // 场景序号
+  title         String   // 场景标题
+  setting       String?  // 地点/环境
+  characters    String?  // JSON 出场角色数组
+  conflict      String?  // 冲突/目标
+  outcome       String?  // 结果
+  emotionalBeat String?  // 情感基调
+  notes         String?  // 备注
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([chapterId])
+  @@index([novelId])
+}
+
 // ─── 章节切片（向量检索用）─────────────────────────
 
 model ChapterChunk {
@@ -409,9 +437,13 @@ model NovelSettings {
   novelId     String   @unique
   novel       Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
 
-  defaultProviderId String?  // 默认 AI 提供商
-  defaultProvider   AIProvider? @relation(fields: [defaultProviderId], references: [id])
-  defaultModel    String?     // 默认模型 ID
+  defaultProviderId String?  // 默认 AI 提供商（聊天）
+  defaultProvider   AIProvider? @relation("DefaultProvider", fields: [defaultProviderId], references: [id])
+  defaultModel    String?     // 默认模型 ID（聊天）
+
+  embeddingProviderId String?  // 嵌入提供商（可独立于聊天）
+  embeddingProvider   AIProvider? @relation("EmbeddingProvider", fields: [embeddingProviderId], references: [id])
+  embeddingModel    String?    // 嵌入模型 ID（如 text-embedding-3-small）
 
   contextWindowSize   Int    @default(2000) // 前文窗口字数
   contextRetrievalScope String @default("volume") // chapter/volume/novel/smart

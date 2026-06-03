@@ -33,7 +33,25 @@ import { getPromptBuilder } from './prompts/builder'
 import { TokenBudget } from './budget'
 import { estimateTokens } from './embedding/chunker'
 import { aiLogger } from './ai-logger'
-import path from 'path'
+import { getActiveProvider } from '@/lib/ai/call'
+import { createDecipheriv } from 'node:crypto'
+import type { EmbeddingConfig } from './types'
+
+const PIPE_DEC_KEY = Buffer.alloc(32)
+Buffer.from((process.env['ENCRYPTION_KEY'] || 'novelcreater-dev-key-32chars-xx').slice(0, 32), 'utf8').copy(PIPE_DEC_KEY)
+
+function decryptPipeKey(encoded: string): string {
+  if (!encoded) return ''
+  try {
+    const parts = encoded.split(':')
+    if (parts.length !== 3) return encoded
+    const iv = Buffer.from(parts[0], 'hex')
+    const tag = Buffer.from(parts[1], 'hex')
+    const d = createDecipheriv('aes-256-gcm', PIPE_DEC_KEY, iv)
+    d.setAuthTag(tag)
+    return Buffer.concat([d.update(Buffer.from(parts[2], 'hex')), d.final()]).toString('utf8')
+  } catch { return encoded }
+}
 
 export class ContextPipeline {
   private coldCollector: ColdContextCollector | null = null
@@ -87,10 +105,11 @@ export class ContextPipeline {
     let coldContext = { retrievedChunks: [] as RetrievedChunk[], retrievedForeshadowings: [] as ForeshadowReminder[] }
 
     try {
-      const dbPath = path.join(process.cwd(), 'dev.db')
-      const vectorStore = getVectorStore(dbPath)
+      const vectorStore = getVectorStore()
       
-      const embeddingService = getEmbeddingService()
+      // 从 NovelSettings 读取嵌入配置
+      const embeddingConfig = await getEmbeddingConfigForNovel(req.novelId)
+      const embeddingService = getEmbeddingService(embeddingConfig)
       vectorStore.ensureTable('chunk_vec', embeddingService.getDimensions())
 
       if (!this.coldCollector) {
@@ -233,6 +252,52 @@ export class ContextPipeline {
 // ─── 单例 ────────────────────────────────────────
 
 let pipelineInstance: ContextPipeline | null = null
+
+// ─── 嵌入配置读取 ────────────────────────────────
+
+async function getEmbeddingConfigForNovel(novelId: string): Promise<Partial<EmbeddingConfig>> {
+  try {
+    const settings = await prisma.novelSettings.findUnique({
+      where: { novelId },
+      select: {
+        embeddingProviderId: true,
+        embeddingModel: true,
+        embeddingProvider: { select: { baseUrl: true, apiKey: true } },
+        defaultProvider: { select: { baseUrl: true, apiKey: true } },
+      },
+    }) as {
+      embeddingProviderId: string | null; embeddingModel: string | null
+      embeddingProvider: { baseUrl: string; apiKey: string } | null
+      defaultProvider: { baseUrl: string; apiKey: string } | null
+    } | null
+
+    const provider = settings?.embeddingProvider || settings?.defaultProvider
+    if (provider?.apiKey) {
+      const model = settings?.embeddingModel || 'BAAI/bge-large-zh-v1.5'
+      return {
+        provider: 'openai',
+        model,
+        dimensions: model.includes('large') ? 1024 : 1536,
+        apiKey: decryptPipeKey(provider.apiKey),
+        baseUrl: provider.baseUrl,
+      }
+    }
+  } catch { /* fallback to local */ }
+
+  // 回退：尝试活跃 provider
+  const active = await getActiveProvider()
+  if (active?.apiKey) {
+    return {
+      provider: 'openai',
+      model: 'BAAI/bge-large-zh-v1.5',
+      dimensions: 1024,
+      apiKey: decryptPipeKey(active.apiKey),
+      baseUrl: active.baseUrl,
+    }
+  }
+
+  return { provider: 'local', model: 'Xenova/bge-small-zh-v1.5', dimensions: 512 }
+}
 
 export function getContextPipeline(): ContextPipeline {
   if (!pipelineInstance) {

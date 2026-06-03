@@ -36,8 +36,19 @@ export class ColdContextCollector {
     const topK = req.options?.retrievalTopK ?? 5
     const scope = req.options?.retrievalScope ?? 'volume'
 
+    // 获取章节摘要，增强查询信号
+    let chapterSummary = ''
+    try {
+      const { prisma } = await import('@/lib/db/prisma')
+      const ch = await prisma.chapter.findUnique({
+        where: { id: req.chapterId },
+        select: { summary: true },
+      }) as { summary: string | null } | null
+      if (ch?.summary) chapterSummary = ch.summary
+    } catch { /* ignore */ }
+
     // 构建查询文本
-    const queryText = this.buildQueryText(req, preContext)
+    const queryText = this.buildQueryText(req, preContext, chapterSummary)
     if (!queryText.trim()) {
       return { retrievedChunks: [], retrievedForeshadowings: [] }
     }
@@ -72,20 +83,28 @@ export class ColdContextCollector {
 
   /**
    * 构建查询文本（用于生成检索向量）
+   * 使用多重信号：前文尾部 + 选中文本 + 用户指令 + 章节摘要
    */
-  private buildQueryText(req: ContextRequest, preContext: string): string {
+  private buildQueryText(req: ContextRequest, preContext: string, chapterSummary?: string): string {
     const parts: string[] = []
 
-    // 前文最后 200 字是最关键的查询信号
+    // 1. 章节摘要（最能代表当前写作方向）
+    if (chapterSummary) {
+      parts.push(chapterSummary)
+    }
+
+    // 2. 前文最后 300 字（最近的上下文信号）
     if (preContext) {
-      const tail = preContext.slice(-200)
+      const tail = preContext.slice(-300)
       parts.push(tail)
     }
 
+    // 3. 用户选中的文本
     if (req.selectedText) {
       parts.push(req.selectedText)
     }
 
+    // 4. 用户指令
     if (req.userInstruction) {
       parts.push(req.userInstruction)
     }

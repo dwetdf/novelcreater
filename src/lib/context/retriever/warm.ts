@@ -39,7 +39,7 @@ export class WarmContextCollector {
   async collect(
     req: ContextRequest,
     entities: EntityMatch[],
-  ): Promise<WarmContext> {
+  ): Promise<WarmContext & { sceneOutline?: string }> {
     const injectChars = req.options?.injectCharacters ?? 'auto'
     const injectSummary = req.options?.injectRecentSummary ?? true
     const injectForeshadow = req.options?.injectForeshadowing ?? true
@@ -55,6 +55,7 @@ export class WarmContextCollector {
       foreshadowReminders,
       factions,
       worldRules,
+      sceneOutline,
     ] = await Promise.all([
       injectChars !== 'off'
         ? this.collectCharacterCards(req.novelId, entities, maxChars)
@@ -70,9 +71,10 @@ export class WarmContextCollector {
         : Promise.resolve([] as ForeshadowReminder[]),
       isGenerative ? this.collectAllFactions(req.novelId) : Promise.resolve([] as FactionCard[]),
       isGenerative ? this.collectAllWorldRules(req.novelId) : Promise.resolve([] as WorldRuleCard[]),
+      this.collectSceneOutline(req),
     ])
 
-    return { characterCards, locationCards, recentSummaries, foreshadowReminders, factions, worldRules }
+    return { characterCards, locationCards, recentSummaries, foreshadowReminders, factions, worldRules, sceneOutline }
   }
 
   /**
@@ -289,6 +291,24 @@ export class WarmContextCollector {
       take: 15,
     }) as WorldRuleCard[]
     return rules
+  }
+
+  /** 获取当前章节的场景细纲，注入 AI 上下文指导写作 */
+  private async collectSceneOutline(req: ContextRequest): Promise<string> {
+    if (req.chapterId === 'brainstorm') return ''
+    try {
+      const scenes = await prisma.chapterScene.findMany({
+        where: { chapterId: req.chapterId },
+        orderBy: { seq: 'asc' },
+        select: { title: true, setting: true, characters: true, conflict: true, outcome: true, emotionalBeat: true },
+      })
+      if (scenes.length === 0) return ''
+      return scenes.map((s: { title: string; setting: string | null; characters: string | null; conflict: string | null; outcome: string | null; emotionalBeat: string | null }, i: number) =>
+        `场景${i + 1}：${s.title}\n  地点：${s.setting || ''}\n  角色：${s.characters || ''}\n  冲突：${s.conflict || ''}\n  结果：${s.outcome || ''}\n  情感：${s.emotionalBeat || ''}`
+      ).join('\n\n')
+    } catch {
+      return ''
+    }
   }
 }
 

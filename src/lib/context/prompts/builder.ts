@@ -17,6 +17,7 @@ interface TemplateVariables {
   styleRule?: string
   hotContext?: string
   warmContext?: string
+  sceneOutline?: string
   coldContext?: string
   preContext?: string
   selectedText?: string
@@ -169,6 +170,9 @@ export class PromptBuilder {
       `- [${r.category ?? '设定'}] ${r.title}：${r.content.slice(0, 100)}`
     ).join('\n')
 
+    // 场景细纲
+    const sceneOutline = (collector.warm as { sceneOutline?: string }).sceneOutline || ''
+
     return {
       preContext: collector.hot.preContext,
       selectedText: req.selectedText,
@@ -184,6 +188,7 @@ export class PromptBuilder {
       hotContext: this.assembleHotContext(collector),
       warmContext: this.assembleWarmContext(collector),
       coldContext: this.assembleColdContext(collector),
+      sceneOutline,
     }
   }
 
@@ -301,6 +306,8 @@ export class PromptBuilder {
 
 {foreshadowReminder}
 
+{sceneOutline}
+
 {retrievedChunks}
 
 请从已写内容的最后一句话之后继续写作。重要规则：
@@ -310,7 +317,7 @@ export class PromptBuilder {
 4. 保持一致的文风、视角和时态
 5. 推进情节发展，避免无意义的水文
 6. 对话要符合各角色的性格和说话方式`,
-        variables: ['novelTitle', 'perspectiveRule', 'tenseRule', 'preContext', 'outlinePosition', 'characters', 'recentSummary', 'foreshadowReminder', 'retrievedChunks'],
+        variables: ['novelTitle', 'perspectiveRule', 'tenseRule', 'preContext', 'outlinePosition', 'characters', 'recentSummary', 'foreshadowReminder', 'sceneOutline', 'retrievedChunks'],
         isBuiltin: true,
         isDefault: true,
       },

@@ -28,6 +28,28 @@ export async function POST(
   return NextResponse.json(volume, { status: 201 })
 }
 
+export async function PATCH(
+  req: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id: novelId } = await params
+  const body = await req.json()
+
+  if (!body.volumeId) {
+    return NextResponse.json({ error: '缺少 volumeId' }, { status: 400 })
+  }
+
+  const volume = await prisma.volume.updateMany({
+    where: { id: body.volumeId, novelId },
+    data: {
+      ...(body.title !== undefined && { title: body.title }),
+      ...(body.summary !== undefined && { summary: body.summary }),
+    },
+  })
+
+  return NextResponse.json({ ok: true, updated: volume.count })
+}
+
 export async function DELETE(
   req: Request,
   { params }: { params: Promise<{ id: string }> }

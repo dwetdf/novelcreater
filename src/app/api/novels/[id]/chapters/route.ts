@@ -41,6 +41,34 @@ export async function POST(
   const { id } = await params
   const body = await req.json()
 
+  let sortOrder = body.sortOrder
+
+  // If inserting after a specific chapter, recalculate sortOrder
+  if (!sortOrder && body.afterChapterId) {
+    const afterChapter = await prisma.chapter.findUnique({
+      where: { id: body.afterChapterId, novelId: id },
+      select: { sortOrder: true, volumeId: true },
+    })
+    if (afterChapter) {
+      // Shift all subsequent chapters up by 1
+      await prisma.chapter.updateMany({
+        where: {
+          novelId: id,
+          volumeId: afterChapter.volumeId,
+          sortOrder: { gt: afterChapter.sortOrder },
+        },
+        data: { sortOrder: { increment: 1 } },
+      })
+      sortOrder = afterChapter.sortOrder + 1
+      // Also set the same volumeId
+      if (!body.volumeId) body.volumeId = afterChapter.volumeId
+    }
+  }
+
+  if (!sortOrder) {
+    sortOrder = await getNextSortOrder(id)
+  }
+
   const chapter = await prisma.chapter.create({
     data: {
       novelId: id,
@@ -49,7 +77,7 @@ export async function POST(
       summary: body.summary || null,
       content: body.content || '',
       targetWords: body.targetWords || 3000,
-      sortOrder: body.sortOrder ?? await getNextSortOrder(id),
+      sortOrder,
     },
   })
 
